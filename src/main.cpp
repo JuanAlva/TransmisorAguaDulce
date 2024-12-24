@@ -10,7 +10,7 @@
 
 #define ADC_CHANNEL 32         // GPIO36 (canal ADC1_CH0 en el ESP32)
 #define SLEEP_DURATION_US 5000000  // 2.5 segundos en microsegundos
-#define SAMPLES_CNT 64         // Número de muestras para suavizado
+#define SAMPLES_CNT 128         // Número de muestras para suavizado
 
 // Tabla de calibración (valores reales vs valores crudos del ADC)
 float voltageReal[] = {0.487, 0.546, 0.604, 0.663, 0.722, 0.78, 0.838, 0.896, 0.956, 1.013, 1.071, 1.13, 1.188, 1.246, 1.305, 1.363, 1.421, 1.48, 1.538, 1.596, 1.653};  // Voltajes reales
@@ -29,26 +29,13 @@ float currentCalib = 0.0;
 // Variable global para almacenar el último valor válido del ADC
 int previous_valid_adc = adcRaw[0];  // Inicializado al valor mínimo esperado
 #define ADC_UMBRAL_MIN adcRaw[0]//480//448 // Corresponde a 0% de 4-20 mA. 0 mA
-#define ADC_UMBRAL_MAX adcRaw[21]//1226//1271 // Corresponde a 33% de 4-20 mA, 0.01456 mA
-
+#define ADC_UMBRAL_MAX adcRaw[calibrationPoints-1]//1226//1271 // Corresponde a 33% de 4-20 mA, 0.01456 mA
 
 // Valores para mapeo de presión
 #define CURRENT_MIN 4.0
 #define CURRENT_MAX 20.0
 #define PRESSURE_MIN 0.0       // Valor de presión mínima
 #define PRESSURE_MAX 10.0      // Valor de presión máxima
-
-// Valores para mapeo de metros columna de agua
-#define CURRENT_MIN_MCA 7.211//6.4455
-#define CURRENT_MAX_MCA 9.4267
-#define MCA_MIN 92.65//65.6235
-#define MCA_MAX 195.05
-
-// Valores para mapeo de metros cubicos
-#define CURRENT_MIN_M3 7.211//6.4455
-#define CURRENT_MAX_M3 9.4267
-#define M3_MIN 11.365// 8.05
-#define M3_MAX 23.9267835
 
 const int csPin = 5;           // LoRa radio chip select
 const int resetPin = 14;       // LoRa radio reset
@@ -61,9 +48,9 @@ const int irqPin = 4;          // Cambiar dependiendo de la placa
 float x_est = 0.0;   // Estimación del estado inicial
 float P_est = 1.0;   // Covarianza inicial
 // Incrementa Q para que el filtro reaccione más rápido.
-float Q = 0.05;//0.05;//0.1;       // Varianza del proceso
+float Q = 0.1;//0.05;//0.05;//0.1;       // Varianza del proceso
 // Incrementa R para atenuar el impacto del ruido en la salida
-float R = 0.35;//0.25;//0.5;       // Varianza del ruido de medición 
+float R = 0.3;//0.35;//0.25;//0.5;       // Varianza del ruido de medición 
 float K = 0.0;       // Ganancia de Kalman
 
 void disableWiFiAndBluetooth() {
@@ -95,53 +82,53 @@ int read_adc(int channel) {
     return adc_value / SAMPLES_CNT;
 }
 
-// Mapea el valor ADC a voltaje en voltios
-float map_adc_to_voltage(int adc_value) {
-    return VOLTAGE_MIN + (VOLTAGE_MAX - VOLTAGE_MIN) * ((float)(adc_value - ADC_MIN) / (ADC_MAX - ADC_MIN));
-}
-
 // Mapea corriente a presión
 float map_current_to_pressure(float current) {
     return PRESSURE_MIN + (PRESSURE_MAX - PRESSURE_MIN) * ((current - CURRENT_MIN) / (CURRENT_MAX - CURRENT_MIN));
 }
 
-// Mapea corriente a metro columna de agua
-float map_current_to_mca(float current) {
-    return MCA_MIN + (MCA_MAX - MCA_MIN) * ((current - CURRENT_MIN_MCA) / (CURRENT_MAX_MCA - CURRENT_MIN_MCA));
-}
+float calibrateVoltageADC(int adcValue) {
+  // Buscar el intervalo correspondiente en la tabla de calibración
+  for (int i = 0; i < calibrationPoints - 1; i++) {
+    if (adcValue >= adcRaw[i] && adcValue <= adcRaw[i + 1]) {
+      // Interpolación lineal para calcular el valor calibrado
+      float deltaVoltage = voltageReal[i + 1] - voltageReal[i];
+      float deltaADC = adcRaw[i + 1] - adcRaw[i];
+      voltageCalib = voltageReal[i] + (deltaVoltage * (adcValue - adcRaw[i]) / deltaADC);
 
-// Mapea corriente metro cubico
-float map_current_to_m3d(float current) {
-    return M3_MIN + (M3_MAX - M3_MIN) * ((current - CURRENT_MIN_M3) / (CURRENT_MAX_M3 - CURRENT_MIN_M3));
-}
+      // Actualizar el último valor válido
+      previous_valid_adc = adcValue;
 
-float calibrateADC(int adcValue) {
-  if (adcValue < ADC_UMBRAL_MIN || adcValue > ADC_UMBRAL_MAX) {
-    Serial.printf("ADC fuera de rango: %d. Usando último valor válido: %d\n", adcValue, previous_valid_adc);
-    adcValue = previous_valid_adc;
-    return adcValue;
-  }
+      // Mensaje opcional de depuración
+      Serial.printf("ADC dentro de rango: %d. Voltaje calibrado: %.2f\n", adcValue, voltageCalib);
 
-  else {
-    for (int i = 0; i < calibrationPoints - 1; i++) {
-      if (adcValue >= adcRaw[i] && adcValue <= adcRaw[i+1]) {
-        voltageCalib = voltageReal[i] + (voltageReal[i+1] - voltageReal[i]) * (adcValue - adcRaw[i]) / (adcRaw[i+1] - adcRaw[i]);
-        previous_valid_adc = adcValue;
-        return voltageCalib;
-      }
+      return voltageCalib;
     }
   }
-}
 
+  // En caso de que no se encuentre un intervalo válido
+  Serial.println("Error: No se encontró un intervalo de calibración válido.");
+  return previous_valid_adc;
+}
 
 float calibrateCurrentADC(int adcValue) {
+    // Buscar el intervalo correspondiente en la tabla de calibración
     for (int i = 0; i < calibrationPoints - 1; i++) {
-      if (adcValue >= adcRaw[i] && adcValue <= adcRaw[i+1]) {
-        currentCalib = currentReal[i] + (currentReal[i+1] -currentReal[i]) * (adcValue - adcRaw[i]) / (adcRaw[i+1] - adcRaw[i]);
-        previous_valid_adc = adcValue;
-        return currentCalib;
-      }
+        if (adcValue >= adcRaw[i] && adcValue <= adcRaw[i + 1]) {
+            // Interpolación lineal para calcular el valor calibrado
+            float deltaCurrent = currentReal[i + 1] - currentReal[i];
+            float deltaADC = adcRaw[i + 1] - adcRaw[i];
+            currentCalib = currentReal[i] + (deltaCurrent * (adcValue - adcRaw[i]) / deltaADC);
+
+            // Actualizar el último valor válido
+            previous_valid_adc = adcValue;
+            return currentCalib;
+        }
     }
+
+    // Este punto no debería alcanzarse si la entrada está dentro del rango
+    Serial.printf("ADC fuera de rango: %d. Usando último valor válido: %d\n", adcValue, previous_valid_adc);
+    return previous_valid_adc;
 }
 
 // Inicializa el módulo LoRa
@@ -184,7 +171,7 @@ void loop() {
     // Leer y procesar el valor ADC
     int adc_value = read_adc(ADC_CHANNEL);
 
-    float calibrated_voltage = calibrateADC(adc_value);
+    float calibrated_voltage = calibrateVoltageADC(adc_value);
     // float voltage = map_adc_to_voltage(adc_value);
     //float filtered_voltage = kalmanFilter(calibrated_voltage);  // Aplicar filtro de Kalman
     float value_current = calibrateCurrentADC(adc_value);
@@ -192,21 +179,19 @@ void loop() {
     float pressure = map_current_to_pressure(current);
     float mca = pressure * 55.8111; //0.704;   // map_current_to_mca(current) / 100;
     float m3 = mca * 12.267 / 100; // Area de tanque de agua m2 (aprox)
-    float m3d = m3;//float m3d = map_current_to_m3d(pressure);
+    float m3d = m3;//
 
     // Crear objeto JSON
-    StaticJsonDocument<128> doc;
-    doc["pressure"] = pressure;
-    doc["mca"] = mca;
+    StaticJsonDocument<32> doc;
     doc["m3d"] = m3d;
 
     // Serializar a cadena
-    char jsonBuffer[128];
+    char jsonBuffer[32];
     serializeJson(doc, jsonBuffer);
 
     // Imprimir resultados
     Serial.printf("\nADC Value: %d, Voltage: %.3f V, Current: %.3f mA, Pressure: %.3f psi, Metros Columna de Agua: %.3f cm, Metros Cubico: %.3f m3\n",
-                  adc_value, calibrated_voltage, current, pressure, mca, m3);
+                  adc_value, calibrated_voltage, current, pressure, mca, m3d);
     Serial.println("Enviando Paquete...");
 
     // Intentar enviar paquete con reintentos
