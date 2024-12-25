@@ -13,18 +13,12 @@
 #define SAMPLES_CNT 128         // Número de muestras para suavizado
 
 // Tabla de calibración (valores reales vs valores crudos del ADC)
-float voltageReal[] = {0.487, 0.546, 0.604, 0.663, 0.722, 0.78, 0.838, 0.896, 0.956, 1.013, 1.071, 1.13, 1.188, 1.246, 1.305, 1.363, 1.421, 1.48, 1.538, 1.596, 1.653};  // Voltajes reales
-float currentReal[] = {4, 4.48, 4.96, 5.44, 5.92, 6.4, 6.88, 7.36, 7.84, 8.32, 8.8, 9.28, 9.76, 10.24, 10.72, 11.2, 11.68, 12.16, 12.64, 13.12, 13.6};  // Corrientes reales
-int adcRaw[] = {240, 302, 340, 387, 435, 483, 530, 585, 637, 692, 742, 797, 853, 904, 956, 1016, 1080, 1138, 1196, 1257, 1350};        // Valores crudos del ADC
-const int calibrationPoints = 21;                  // Numero de puntos en la tabla
+float voltageReal[] = {0.487, 0.546, 0.604, 0.663, 0.722, 0.78, 0.838, 0.896, 0.956, 1.013, 1.071, 1.13, 1.188, 1.246, 1.305, 1.363, 1.421};//, 1.48, 1.538, 1.596, 1.653};  // Voltajes reales
+float currentReal[] = {4, 4.48, 4.96, 5.44, 5.92, 6.4, 6.88, 7.36, 7.84, 8.32, 8.8, 9.28, 9.76, 10.24, 10.72, 11.2, 11.68};//, 12.16, 12.64, 13.12, 13.6};  // Corrientes reales
+int adcRaw[] = {240, 302, 340, 387, 435, 483, 530, 585, 637, 692, 742, 797, 853, 904, 956, 1016, 1080};//, 1138, 1196, 1257, 1350};        // Valores crudos del ADC
+const int calibrationPoints = 17;                  // Numero de puntos en la tabla
 float voltageCalib = 0.0;
 float currentCalib = 0.0;
-
-// Valores para el mapeo
-#define ADC_MIN 480//410//549//480//448            // Valor ADC para 0.66 V
-#define ADC_MAX 850//1152//810//713//800//808            //780            // Valor ADC para 2.45 V  .
-#define VOLTAGE_MIN 0.787//0.49866//0.864//0.787//0.487      // Voltaje mínimo esperado
-#define VOLTAGE_MAX 1.205//2.44890//1.1550//1.051//1.151//1.160      //1.101      // Voltaje máximo esperado
 
 // Variable global para almacenar el último valor válido del ADC
 int previous_valid_adc = adcRaw[0];  // Inicializado al valor mínimo esperado
@@ -177,21 +171,20 @@ void loop() {
     float value_current = calibrateCurrentADC(adc_value);
     float current = kalmanFilter(value_current);
     float pressure = map_current_to_pressure(current);
-    float mca = pressure * 55.8111; //0.704;   // map_current_to_mca(current) / 100;
-    float m3 = mca * 12.267 / 100; // Area de tanque de agua m2 (aprox)
-    float m3d = m3;//
+    float mtr = pressure * 55.6701; //0.704;   // map_current_to_mca(current) / 100;
+    float m3d = mtr * 12.267 / 100; // Area de tanque de agua m2 (aprox)
 
     // Crear objeto JSON
-    StaticJsonDocument<32> doc;
+    StaticJsonDocument<64> doc;
     doc["m3d"] = m3d;
 
     // Serializar a cadena
-    char jsonBuffer[32];
+    char jsonBuffer[64];
     serializeJson(doc, jsonBuffer);
 
     // Imprimir resultados
     Serial.printf("\nADC Value: %d, Voltage: %.3f V, Current: %.3f mA, Pressure: %.3f psi, Metros Columna de Agua: %.3f cm, Metros Cubico: %.3f m3\n",
-                  adc_value, calibrated_voltage, current, pressure, mca, m3d);
+                  adc_value, calibrated_voltage, current, pressure, mtr, m3d);
     Serial.println("Enviando Paquete...");
 
     // Intentar enviar paquete con reintentos
