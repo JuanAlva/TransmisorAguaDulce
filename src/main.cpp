@@ -3,71 +3,63 @@
 #include <LoRa.h>
 #include <ArduinoJson.h>
 #include <esp_task_wdt.h>
-#include <esp_sleep.h>
 #include <WiFi.h>
 #include <esp_bt.h>
-#include <esp_system.h>  // Incluir esta librería para utilizar esp_restart()
+#include <esp_system.h>
 
-#define ADC_CHANNEL 32         // GPIO36 (canal ADC1_CH0 en el ESP32)
-#define SLEEP_DURATION_US 5000000  // 2.5 segundos en microsegundos
-#define SAMPLES_CNT 128         // Número de muestras para suavizado
+#define ADC_CHANNEL 32
+#define SAMPLES_CNT 8192
 
-// Tabla de calibración (valores reales vs valores crudos del ADC)
-float voltageReal[] = {0.487, 0.546, 0.604, 0.663, 0.722, 0.78, 0.838, 0.896, 0.956, 1.013, 1.071, 1.13, 1.188, 1.246, 1.305, 1.363, 1.421};//, 1.48, 1.538, 1.596, 1.653};  // Voltajes reales
-float currentReal[] = {4, 4.48, 4.96, 5.44, 5.92, 6.4, 6.88, 7.36, 7.84, 8.32, 8.8, 9.28, 9.76, 10.24, 10.72, 11.2, 11.68};//, 12.16, 12.64, 13.12, 13.6};  // Corrientes reales
-int adcRaw[] = {240, 302, 340, 387, 435, 483, 530, 585, 637, 692, 742, 797, 853, 904, 956, 1016, 1080};//, 1138, 1196, 1257, 1350};        // Valores crudos del ADC
-const int calibrationPoints = 17;                  // Numero de puntos en la tabla
+#define SS      5   // Pin NSS (CS) del modulo LoRa
+#define RST     14  // Pin RESET del modulo LoRa
+#define DIO0    4   // Pin DIO0 del modulo LoRa
+#define BAND    433E6 // Frecuencia LoRa
+
+float voltageReal[] = {0.7245, 0.8036, 0.959, 1.2557, 1.2896};//{0.487, 0.546, 0.604, 0.663, 0.722, 0.78, 0.864, 0.896, 0.956, 1.013, 1.071, 1.128, 1.188, 1.246, 1.305};
+int adcRaw[] = {295, 362, 470, 745, 774};//{260, 312, 350, 397, 445, 493, 526, 595, 647, 702, 752, 781, 863, 914, 966};
+const int calibrationPoints = 5;// 15;
 float voltageCalib = 0.0;
-float currentCalib = 0.0;
 
-// Variable global para almacenar el último valor válido del ADC
-int previous_valid_adc = adcRaw[0];  // Inicializado al valor mínimo esperado
-#define ADC_UMBRAL_MIN adcRaw[0]//480//448 // Corresponde a 0% de 4-20 mA. 0 mA
-#define ADC_UMBRAL_MAX adcRaw[calibrationPoints-1]//1226//1271 // Corresponde a 33% de 4-20 mA, 0.01456 mA
+#define ADC_UMBRAL_MIN adcRaw[0]
+#define ADC_UMBRAL_MAX adcRaw[calibrationPoints-1]
 
-// Valores para mapeo de presión
-#define CURRENT_MIN 4.0
-#define CURRENT_MAX 20.0
-#define PRESSURE_MIN 0.0       // Valor de presión mínima
-#define PRESSURE_MAX 10.0      // Valor de presión máxima
+#define RETRY_LIMIT 3
+#define WATCHDOG_TIMEOUT 30
 
-const int csPin = 5;           // LoRa radio chip select
-const int resetPin = 14;       // LoRa radio reset
-const int irqPin = 4;          // Cambiar dependiendo de la placa
-
-#define RETRY_LIMIT 3          // Número máximo de reintentos para enviar un paquete
-#define WATCHDOG_TIMEOUT 10    // Tiempo límite en segundos para el Watchdog
-
-// Variables del filtro de Kalman
-float x_est = 0.0;   // Estimación del estado inicial
-float P_est = 1.0;   // Covarianza inicial
-// Incrementa Q para que el filtro reaccione más rápido.
-float Q = 0.1;//0.05;//0.05;//0.1;       // Varianza del proceso
-// Incrementa R para atenuar el impacto del ruido en la salida
-float R = 0.3;//0.35;//0.25;//0.5;       // Varianza del ruido de medición 
-float K = 0.0;       // Ganancia de Kalman
+float x_est = 0.0;
+float P_est = 1.0;
+float Q = 0.1;
+float R = 0.3;
+float K = 0.0;
 
 void disableWiFiAndBluetooth() {
-    WiFi.mode(WIFI_OFF);   // Apaga Wi-Fi
-    WiFi.disconnect(true); // Desconecta Wi-Fi
-    btStop();              // Apaga Bluetooth
+    WiFi.mode(WIFI_OFF);
+    WiFi.disconnect(true);
+    btStop();
 }
 
-// Función del filtro de Kalman
-float kalmanFilter(float z_measured) {
+struct KalmanOutput {
+    float x_est;
+    float P_est;
+    float K;
+};
+
+KalmanOutput kalmanFilter(float z_measured) {
     // Predicción
     float x_pred = x_est;
     float P_pred = P_est + Q;
 
+    // Ganancia de Kalman
+    float K = P_pred / (P_pred + R);
+
     // Corrección
-    K = P_pred / (P_pred + R);
     x_est = x_pred + K * (z_measured - x_pred);
     P_est = (1 - K) * P_pred;
 
-    return x_est;
+    // Retornar los valores
+    return {x_est, P_est, K};
 }
 
-// Lee el ADC y promedia las lecturas
 int read_adc(int channel) {
     int adc_value = 0;
     for (int i = 0; i < SAMPLES_CNT; i++) {
@@ -76,147 +68,95 @@ int read_adc(int channel) {
     return adc_value / SAMPLES_CNT;
 }
 
-// Mapea corriente a presión
-float map_current_to_pressure(float current) {
-    return PRESSURE_MIN + (PRESSURE_MAX - PRESSURE_MIN) * ((current - CURRENT_MIN) / (CURRENT_MAX - CURRENT_MIN));
-}
-
 float calibrateVoltageADC(int adcValue) {
-  // Buscar el intervalo correspondiente en la tabla de calibración
-  for (int i = 0; i < calibrationPoints - 1; i++) {
-    if (adcValue >= adcRaw[i] && adcValue <= adcRaw[i + 1]) {
-      // Interpolación lineal para calcular el valor calibrado
-      float deltaVoltage = voltageReal[i + 1] - voltageReal[i];
-      float deltaADC = adcRaw[i + 1] - adcRaw[i];
-      voltageCalib = voltageReal[i] + (deltaVoltage * (adcValue - adcRaw[i]) / deltaADC);
-
-      // Actualizar el último valor válido
-      previous_valid_adc = adcValue;
-
-      // Mensaje opcional de depuración
-      Serial.printf("ADC dentro de rango: %d. Voltaje calibrado: %.2f\n", adcValue, voltageCalib);
-
-      return voltageCalib;
-    }
-  }
-
-  // En caso de que no se encuentre un intervalo válido
-  Serial.println("Error: No se encontró un intervalo de calibración válido.");
-  return previous_valid_adc;
-}
-
-float calibrateCurrentADC(int adcValue) {
-    // Buscar el intervalo correspondiente en la tabla de calibración
+    if (adcValue < adcRaw[0]) return voltageReal[0];
+    if (adcValue > adcRaw[calibrationPoints - 1]) return voltageReal[calibrationPoints - 1];
+    
     for (int i = 0; i < calibrationPoints - 1; i++) {
         if (adcValue >= adcRaw[i] && adcValue <= adcRaw[i + 1]) {
-            // Interpolación lineal para calcular el valor calibrado
-            float deltaCurrent = currentReal[i + 1] - currentReal[i];
+            float deltaVoltage = voltageReal[i + 1] - voltageReal[i];
             float deltaADC = adcRaw[i + 1] - adcRaw[i];
-            currentCalib = currentReal[i] + (deltaCurrent * (adcValue - adcRaw[i]) / deltaADC);
-
-            // Actualizar el último valor válido
-            previous_valid_adc = adcValue;
-            return currentCalib;
+            return voltageReal[i] + (deltaVoltage * (adcValue - adcRaw[i]) / deltaADC);
         }
     }
-
-    // Este punto no debería alcanzarse si la entrada está dentro del rango
-    Serial.printf("ADC fuera de rango: %d. Usando último valor válido: %d\n", adcValue, previous_valid_adc);
-    return previous_valid_adc;
+    return voltageCalib;
 }
 
-// Inicializa el módulo LoRa
 void initLoRa() {
     Serial.println("Inicializando módulo LoRa...");
-    LoRa.setPins(csPin, resetPin, irqPin);
-    if (!LoRa.begin(433E6)) {
-        Serial.println("Error al Iniciar LoRa!");
-        esp_restart(); // Reiniciar el ESP32 si falla LoRa
-    }
-    LoRa.setSyncWord(0xF3);
-    Serial.println("LoRa Inicializado Correctamente!");
-}
+    
+    // Configura pines
+    LoRa.setPins(SS, RST, DIO0);
+    
+    // Inicializa LoRa    
+    if (!LoRa.begin(BAND)) {
+        Serial.println("Error al inicializar LoRa. Reiniciando...");
+        esp_restart();
+    }    
 
-void enterLowPowerMode() {
-    LoRa.sleep();  // Módulo LoRa en modo de bajo consumo
-    Serial.println("Módulo LoRa en modo de bajo consumo...");
-    esp_sleep_enable_timer_wakeup(SLEEP_DURATION_US);  // Temporizador para despertar
-    esp_light_sleep_start();  // Entra en Light Sleep
-    Serial.println("Despertando...");
+    // Configuracion avanzada (opcional)
+    LoRa.setSyncWord(0xF3);
+    LoRa.setTxPower(20, PA_OUTPUT_PA_BOOST_PIN); // Potencia de transmisión
+    LoRa.setSpreadingFactor(7);  // Spreading Factor
+    LoRa.setSignalBandwidth(125E3); // Ancho de banda (125 kHz)
+    LoRa.setCodingRate4(5);  // Coding Rate 4/5
+    Serial.println("LoRa Inicializado Correctamente!");
 }
 
 void setup() {
     Serial.begin(115200);
     analogReadResolution(12);
-    analogSetAttenuation(ADC_11db); //ADC_6db
-
+    analogSetAttenuation(ADC_11db);
+    // Inicializar el watchodg con tiempo limite de 10 segundos
     esp_task_wdt_init(WATCHDOG_TIMEOUT, true);
-    esp_task_wdt_add(NULL);
-
+    esp_task_wdt_add(NULL); // Se aplica al loop principal
     disableWiFiAndBluetooth();
-
-    while (!Serial);
     initLoRa();
 }
 
+unsigned long lastSampleTime = 0;
+const unsigned long sampleInterval = 1000;
+
 void loop() {
-    esp_task_wdt_reset();
+    if (millis() - lastSampleTime >= sampleInterval) {
+        lastSampleTime = millis();
+        int adc_value = read_adc(ADC_CHANNEL); // Lectura del ADc
+        if (adc_value < ADC_UMBRAL_MIN || adc_value > ADC_UMBRAL_MAX) {
+            Serial.println("Medición fuera de rango. Descartando datos.");
+            return;
+        }
+        float calibrated_voltage = calibrateVoltageADC(adc_value);  // Calibracion del Voltaje del ADc
+        KalmanOutput result = kalmanFilter(calibrated_voltage); // Aplicacion del Filtro de Kalman
+        float mtr = calibrated_voltage * 360.54 - 220.7; // Conversion a Metro columna de agua
+        float m3d = mtr * 0.1227 + 0.0298; // Conversion a Metros cubicos
+        
+        // Formateo en JSON
+        StaticJsonDocument<64> doc;
+        doc["m3d"] = m3d;
+        char jsonBuffer[64];
+        serializeJson(doc, jsonBuffer);
 
-    // Leer y procesar el valor ADC
-    int adc_value = read_adc(ADC_CHANNEL);
-
-    float calibrated_voltage = calibrateVoltageADC(adc_value);
-    // float voltage = map_adc_to_voltage(adc_value);
-    //float filtered_voltage = kalmanFilter(calibrated_voltage);  // Aplicar filtro de Kalman
-    float value_current = calibrateCurrentADC(adc_value);
-    float current = kalmanFilter(value_current);
-    float pressure = map_current_to_pressure(current);
-    float mtr = pressure * 55.6701; //0.704;   // map_current_to_mca(current) / 100;
-    float m3d = mtr * 12.267 / 100; // Area de tanque de agua m2 (aprox)
-
-    // Crear objeto JSON
-    StaticJsonDocument<64> doc;
-    doc["m3d"] = m3d;
-
-    // Serializar a cadena
-    char jsonBuffer[64];
-    serializeJson(doc, jsonBuffer);
-
-    // Imprimir resultados
-    Serial.printf("\nADC Value: %d, Voltage: %.3f V, Current: %.3f mA, Pressure: %.3f psi, Metros Columna de Agua: %.3f cm, Metros Cubico: %.3f m3\n",
-                  adc_value, calibrated_voltage, current, pressure, mtr, m3d);
-    Serial.println("Enviando Paquete...");
-
-    // Intentar enviar paquete con reintentos
-    int retries = 0;
-    bool success = false;
-
-    while (retries < RETRY_LIMIT && !success) {
-        // Enviar datos
-        LoRa.idle();  // Activar módulo LoRa
+        // Imprimir datos en serial
+        Serial.printf("\nADC Value: %d, Voltage: %.3f V, kalman: %.3f V, Metros Columna de Agua: %.3f cm, Metros Cubico: %.3f m3\n", adc_value, calibrated_voltage, result.x_est, mtr, m3d);
+        Serial.println("Enviando Paquete...");
+        Serial.printf("Kalman Output -> x_est: %.3f V, P_est: %.5f, K: %.5f\n", 
+            result.x_est, result.P_est, result.K);
+        
+        LoRa.idle();
         LoRa.beginPacket();
         LoRa.print(jsonBuffer);
         if (LoRa.endPacket() == 0) {
-            retries++;
-            Serial.printf("Error enviando paquete, intento %d/%d\n", retries, RETRY_LIMIT);
+            Serial.println("Error: No se pudo enviar el paquete. Reiniciando módulo LoRa...");
+            LoRa.end();
             delay(1000);
+            esp_task_wdt_delete(NULL); // Pausar watchdog temporalmente
+            initLoRa();
+            esp_task_wdt_add(NULL); // Reactivar watchdog
         } else {
-            success = true;
             Serial.println("Paquete enviado correctamente");
         }
+        
+        // Alimentar el watchdog
+        //esp_task_wdt_reset();
     }
-
-    if (!success) {
-        Serial.println("Error: No se pudo enviar el paquete después de varios intentos.");
-        Serial.println("Reiniciando módulo LoRa...");
-        LoRa.end();
-        delay(1000);
-        initLoRa();
-        // Reiniciar si después de varios intentos LoRa no funciona
-        Serial.println("Reiniciando el sistema...");
-        esp_restart();  // Reiniciar el ESP32
-    }
-
-    // Entrar en modo de bajo consumo
-    enterLowPowerMode();
 }
