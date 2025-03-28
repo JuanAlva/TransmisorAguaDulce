@@ -16,10 +16,12 @@
 #define DIO0    4   // Pin DIO0 del modulo LoRa
 #define BAND    433E6 // Frecuencia LoRa
 
-float voltageReal[] = {4.15, 8, 12, 12.5};
-int adcRaw[] = {10535, 20244, 30307, 31566};
-const int calibrationPoints = 4;
-float voltageCalib = 0.0;
+//float voltageReal[] = {4.15, 8, 12, 12.5};
+float normalRaw[] = {0, 0.5, 1};
+//int adcRaw[] = {10535, 20244, 30307, 31566};
+int adcRaw[] = {10158, 30307, 50456};
+const int calibrationPoints = 3;
+float normalCalib = 0.0;
 
 #define ADC_UMBRAL_MIN adcRaw[0]
 #define ADC_UMBRAL_MAX adcRaw[calibrationPoints-1]
@@ -36,17 +38,17 @@ void disableWiFiAndBluetooth() {
 }
 
 float calibrater(int adcValue) {
-    if (adcValue < adcRaw[0]) return voltageReal[0];
-    if (adcValue > adcRaw[calibrationPoints - 1]) return voltageReal[calibrationPoints - 1];
+    if (adcValue < adcRaw[0]) return normalRaw[0];
+    if (adcValue > adcRaw[calibrationPoints - 1]) return normalRaw[calibrationPoints - 1];
     
     for (int i = 0; i < calibrationPoints - 1; i++) {
         if (adcValue >= adcRaw[i] && adcValue <= adcRaw[i + 1]) {
-            float deltaVoltage = voltageReal[i + 1] - voltageReal[i];
+            float deltaNormal = normalRaw[i + 1] - normalRaw[i];
             float deltaADC = adcRaw[i + 1] - adcRaw[i];
-            return voltageReal[i] + (deltaVoltage * (adcValue - adcRaw[i]) / deltaADC);
+            return normalRaw[i] + (deltaNormal * (adcValue - adcRaw[i]) / deltaADC);
         }
     }
-    return voltageCalib;
+    return normalCalib;
 }
 
 float normalizeCurrent(float current_mA) {
@@ -115,20 +117,21 @@ void loop() {
             return;
         }
         rawValue = ads.readADC_SingleEnded(0);
-        float voltage = rawValue * 2.048 / 32768.0;  // Conversión correcta
-        float calibrateSignal = calibrater(rawValue);  // Calibracion del Voltaje del ADC
-        float normalizedValue = normalizeCurrent(calibrateSignal);
-        float mtr = normalizedValue * 669.754;//360.54 - 220.7; // Conversion a Metro columna de agua
+        float normalizedValue = calibrater(rawValue);  // Calibracion del Voltaje del ADC
+        float mtr = normalizedValue * 570.4304;//669.754;//360.54 - 220.7; // Conversion a Metro columna de agua
         float m3d = mtr * 0.1227 + 0.0298; // Conversion a Metros cubicos
         
         // Formateo en JSON
-        StaticJsonDocument<64> doc;
+        StaticJsonDocument<128> doc;
         doc["m3d"] = m3d;
-        char jsonBuffer[64];
+        doc["mtr"] = mtr;
+        doc["nor"] = normalizedValue;
+        doc["adc"] = rawValue;
+        char jsonBuffer[128];
         serializeJson(doc, jsonBuffer);
 
         // Imprimir datos en serial
-        Serial.printf("\nADC: %d, Voltaje: %.3f V, Corriente: %.3f mA, Normal: %.3f, Metros Columna de Agua: %.3f cm, Metros Cubico: %.3f m3\n", rawValue, voltage, calibrateSignal, normalizedValue, mtr, m3d);
+        Serial.printf("\nADC: %d, Normal: %.3f, Metros Columna de Agua: %.3f cm, Metros Cubico: %.3f m3\n", rawValue, normalizedValue, mtr, m3d);
         Serial.println("Enviando Paquete...");
         
         LoRa.idle();
